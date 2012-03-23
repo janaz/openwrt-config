@@ -1,0 +1,851 @@
+Index: image/ubinize.cfg
+===================================================================
+--- image/ubinize.cfg	(revision 0)
++++ image/ubinize.cfg	(revision 0)
+@@ -0,0 +1,14 @@
++[rootfs]
++# Volume mode (other option is static)
++mode=ubi
++# Source image
++image=root.ubifs
++# Volume ID in UBI image
++vol_id=0
++# Allow for dynamic resize
++vol_type=dynamic
++# Volume name
++vol_name=rootfs
++# Autoresize volume at first mount
++vol_flags=autoresize
++
+Index: image/Makefile
+===================================================================
+--- image/Makefile	(revision 30968)
++++ image/Makefile	(working copy)
+@@ -1,5 +1,5 @@
+ #
+-# Copyright (C) 2009-2010 OpenWrt.org
++# Copyright (C) 2009-2012 OpenWrt.org
+ #
+ # This is free software, licensed under the GNU General Public License v2.
+ # See /LICENSE for more information.
+@@ -8,9 +8,28 @@
+ include $(INCLUDE_DIR)/image.mk
+ 
+ JFFS2OPTS += --little-endian --pagesize=0x800 --no-cleanmarkers --pad
++JFFS2_BLOCKSIZE = 128k
+ 
++ifeq ($(PROFILE),Sheevaplug)
++UBIFS_OPTS += -m 2048 -e 126KiB -c 8192
++UBINIZE_OPTS += -m 2048 -p 128KiB -s 512
++endif
++ifeq ($(PROFILE),Dockstar)
++UBIFS_OPTS += -m 2048 -e 126KiB -c 4096
++UBINIZE_OPTS += -m 2048 -p 128KiB -s 512
++endif
++ifeq ($(PROFILE),Iconnect)
++UBIFS_OPTS += -m 2048 -e 126KiB -c 8192
++UBINIZE_OPTS += -m 2048 -p 128KiB -s 512
++endif
++ifeq ($(PROFILE),RaidSonic)
++UBIFS_OPTS += -m 2048 -e 126KiB -c 4096
++UBINIZE_OPTS += -m 2048 -p 128KiB -s 512
++endif
++
+ define Image/Prepare
+ 	cp $(LINUX_DIR)/arch/arm/boot/uImage $(KDIR)/uImage
++	cp $(LINUX_DIR)/arch/arm/boot/zImage $(KDIR)/zImage
+ endef
+ 
+ define Image/BuildKernel
+@@ -31,6 +50,10 @@
+ endef
+ 
+ define Image/Build/squashfs
++	$(STAGING_DIR_HOST)/bin/mkimage -A arm -O linux -T multi \
++	-C none -a 0x00008000 -e 0x00008000 -n 'Linux-$(LINUX_VERSION)-initrd' \
++	-d $(KDIR)/zImage:$(KDIR)/root.squashfs $(BIN_DIR)/$(IMG_PREFIX)-$(PROFILE)-$(1).uimg
++
+ 	$(call prepare_generic_squashfs,$(KDIR)/root.squashfs)
+ 	( \
+ 		dd if=$(KDIR)/uImage bs=4096k conv=sync; \
+Index: files/arch/arm/mach-kirkwood/iconnect-setup.c
+===================================================================
+--- files/arch/arm/mach-kirkwood/iconnect-setup.c	(revision 0)
++++ files/arch/arm/mach-kirkwood/iconnect-setup.c	(revision 0)
+@@ -0,0 +1,188 @@
++/*
++ * arch/arm/mach-kirkwood/iconnect-setup.c
++ *
++ * Iomega iConnect Wireless
++ *
++ * This file is licensed under the terms of the GNU General Public
++ * License version 2.  This program is licensed "as is" without any
++ * warranty of any kind, whether express or implied.
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/platform_device.h>
++#include <linux/irq.h>
++#include <linux/mtd/partitions.h>
++#include <linux/mv643xx_eth.h>
++#include <linux/ethtool.h>
++#include <linux/gpio.h>
++#include <linux/gpio_keys.h>
++#include <linux/input.h>
++#include <linux/leds.h>
++#include <asm/mach-types.h>
++#include <asm/mach/arch.h>
++#include <mach/kirkwood.h>
++#include "common.h"
++#include "mpp.h"
++
++static struct mtd_partition iconnect_nand_parts[] = {
++	{
++		.name = "u-boot",
++		.offset = 0,
++		.size = SZ_1M
++	}, {
++		.name = "uImage",
++		.offset = MTDPART_OFS_NXTBLK,
++		.size = SZ_1M + SZ_2M
++	}, {
++		.name = "rootfs",
++		.offset = MTDPART_OFS_NXTBLK,
++		.size = SZ_32M,
++	}, {
++		.name = "data",
++		.offset = MTDPART_OFS_NXTBLK,
++		.size = MTDPART_SIZ_FULL
++	},
++};
++
++static struct mv643xx_eth_platform_data iconnect_ge00_data = {
++	.phy_addr	= MV643XX_ETH_PHY_ADDR(11),
++};
++
++static struct gpio_led iconnect_led_pins[] = {
++	{
++		.name			= "iconnect:blue:power",
++		.default_trigger	= "default-on",
++		.gpio			= 42,
++	},
++	{
++		.name			= "iconnect:red:power",
++		.gpio			= 43,
++	},
++	{
++		.name			= "iconnect:blue:usb1",
++		.gpio			= 44,
++	},
++	{
++		.name			= "iconnect:blue:usb2",
++		.gpio			= 45,
++	},
++	{
++		.name			= "iconnect:blue:usb3",
++		.gpio			= 46,
++	},
++	{
++		.name			= "iconnect:blue:usb4",
++		.gpio			= 47,
++	},
++	{
++		.name			= "iconnect:blue:otb",
++		.gpio			= 48,
++	},
++};
++
++static struct gpio_led_platform_data iconnect_led_data = {
++	.leds		= iconnect_led_pins,
++	.num_leds	= ARRAY_SIZE(iconnect_led_pins),
++};
++
++static struct platform_device iconnect_leds = {
++	.name	= "leds-gpio",
++	.id	= -1,
++	.dev	= {
++		.platform_data	= &iconnect_led_data,
++	}
++};
++
++#define ICONNECT_GPIO_KEY_RESET		12
++#define ICONNECT_GPIO_KEY_OTB		35
++
++#define ICONNECT_SW_RESET		0x00
++#define ICONNECT_SW_OTB			0x01
++
++static struct gpio_keys_button iconnect_buttons[] = {
++		{
++		.type		= EV_SW,
++		.code		= ICONNECT_SW_RESET,
++		.gpio		= ICONNECT_GPIO_KEY_RESET,
++		.desc		= "Reset Button",
++		.active_low	= 1,
++		.debounce_interval = 100,
++		}, 
++		{
++		.type		= EV_SW,
++		.code		= ICONNECT_SW_OTB,
++		.gpio		= ICONNECT_GPIO_KEY_OTB,
++		.desc		= "OTB Button",
++		.active_low	= 1,
++		.debounce_interval = 100,
++		},
++};
++
++static struct gpio_keys_platform_data iconnect_button_data = {
++	.buttons	= iconnect_buttons,
++	.nbuttons	= ARRAY_SIZE(iconnect_buttons),
++};
++
++static struct platform_device iconnect_button_device = {
++	.name	   = "gpio-keys",
++	.id	     = -1,
++	.num_resources	= 0,
++	.dev	    =	{
++					.platform_data  = &iconnect_button_data,
++					},
++};
++
++static unsigned int iconnect_mpp_config[] __initdata = {
++	MPP12_GPIO, /*Input for reset button*/
++	MPP35_GPIO, /*Input for OTB button*/
++	MPP42_GPIO,
++	MPP43_GPIO,
++	MPP44_GPIO,
++	MPP45_GPIO,
++	MPP46_GPIO,
++	MPP47_GPIO,
++	MPP48_GPIO,
++	0
++};
++
++static void __init iconnect_init(void)
++{
++	u32 dev, rev;
++
++	/*
++	 * Basic setup. Needs to be called early.
++	 */
++	kirkwood_init();
++	kirkwood_mpp_conf(iconnect_mpp_config);
++
++	kirkwood_nand_init(ARRAY_AND_SIZE(iconnect_nand_parts), 25);
++	kirkwood_ehci_init();
++
++	kirkwood_ge00_init(&iconnect_ge00_data);
++	kirkwood_pcie_id(&dev, &rev);
++
++	kirkwood_uart0_init();
++	kirkwood_i2c_init();
++
++	platform_device_register(&iconnect_leds);
++	platform_device_register(&iconnect_button_device);
++}
++
++static int __init iconnect_pci_init(void)
++{
++	if (machine_is_iconnect())
++		kirkwood_pcie_init(KW_PCIE0);
++
++	return 0;
++}
++subsys_initcall(iconnect_pci_init);
++
++
++MACHINE_START(ICONNECT, "Iomega iConnect Wireless")
++	.atag_offset	= 0x100,
++	.init_machine	= iconnect_init,
++	.map_io		= kirkwood_map_io,
++	.init_irq	= kirkwood_init_irq,
++	.timer		= &kirkwood_timer,
++MACHINE_END
+Index: files/arch/arm/mach-kirkwood/nas6210-setup.c
+===================================================================
+--- files/arch/arm/mach-kirkwood/nas6210-setup.c	(revision 0)
++++ files/arch/arm/mach-kirkwood/nas6210-setup.c	(revision 0)
+@@ -0,0 +1,189 @@
++/*
++ * arch/arm/mach-kirkwood/nas6210-setup.c
++ *
++ * Raidsonic ICYBOX NAS6210 Board Setup
++ *
++ * This file is licensed under the terms of the GNU General Public
++ * License version 2.  This program is licensed "as is" without any
++ * warranty of any kind, whether express or implied.
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/platform_device.h>
++#include <linux/ata_platform.h>
++#include <linux/mtd/partitions.h>
++#include <linux/mv643xx_eth.h>
++#include <linux/gpio.h>
++#include <linux/gpio_keys.h>
++#include <linux/input.h>
++#include <linux/leds.h>
++#include <asm/mach-types.h>
++#include <asm/mach/arch.h>
++#include <mach/kirkwood.h>
++#include "common.h"
++#include "mpp.h"
++
++#define NAS6210_GPIO_POWER_OFF	24
++
++static struct mtd_partition nas6210_nand_parts[] = {
++	{
++		.name = "uboot",
++		.offset = 0,
++		.size = SZ_512K
++	}, {
++		.name = "uboot_env",
++		.offset = MTDPART_OFS_NXTBLK,
++		.size = SZ_128K
++	}, {
++		.name = "kernel",
++		.offset = MTDPART_OFS_NXTBLK,
++		.size = 3 * SZ_1M
++	}, {
++		.name = "rootfs",
++		.offset = MTDPART_OFS_NXTBLK,
++		.size = MTDPART_SIZ_FULL
++	},
++};
++
++static struct mv643xx_eth_platform_data nas6210_ge00_data = {
++	.phy_addr	= MV643XX_ETH_PHY_ADDR(8),
++};
++
++static struct mv_sata_platform_data nas6210_sata_data = {
++	.n_ports	= 2,
++};
++
++static struct gpio_led nas6210_led_pins[] = {
++	{
++		.name			= "status:green:power",
++		.default_trigger	= "default-on",
++		.gpio			= 25,
++		.active_low		= 0,
++	},
++	{
++		.name			= "status:red:power",
++		.default_trigger	= "none",
++		.gpio			= 22,
++		.active_low		= 0,
++	},
++	{
++		.name			= "status:red:usb_copy",
++		.default_trigger	= "none",
++		.gpio			= 27,
++		.active_low		= 0,
++	},
++};
++
++static struct gpio_led_platform_data nas6210_led_data = {
++	.leds		= nas6210_led_pins,
++	.num_leds	= ARRAY_SIZE(nas6210_led_pins),
++};
++
++static struct platform_device nas6210_leds = {
++	.name	= "leds-gpio",
++	.id	= -1,
++	.dev	= {
++		.platform_data	= &nas6210_led_data,
++	}
++};
++
++static struct gpio_keys_button nas6210_buttons[] = {
++	{
++		.code		= KEY_COPY,
++		.gpio		= 29,
++		.desc		= "USB Copy",
++		.active_low	= 1,
++	},
++	{
++		.code		= KEY_RESTART,
++		.gpio		= 28,
++		.desc		= "Reset",
++		.active_low	= 1,
++	},
++};
++
++static struct gpio_keys_platform_data nas6210_button_data = {
++	.buttons	= nas6210_buttons,
++	.nbuttons	= ARRAY_SIZE(nas6210_buttons),
++};
++
++static struct platform_device nas6210_button_device = {
++	.name		= "gpio-keys",
++	.id		= -1,
++	.num_resources	= 0,
++	.dev		= {
++		.platform_data	= &nas6210_button_data,
++	}
++};
++
++static unsigned int nas6210_mpp_config[] __initdata = {
++	MPP0_NF_IO2,
++	MPP1_NF_IO3,
++	MPP2_NF_IO4,
++	MPP3_NF_IO5,
++	MPP4_NF_IO6,
++	MPP5_NF_IO7,
++	MPP18_NF_IO0,
++	MPP19_NF_IO1,
++ 	MPP22_GPIO,	/* Power LED red */
++	MPP24_GPIO,	/* Power off device */
++	MPP25_GPIO,	/* Power LED green */
++	MPP27_GPIO,	/* USB transfer LED */
++	MPP28_GPIO,	/* Reset button */
++	MPP29_GPIO,	/* USB Copy button */
++	0
++};
++
++static void nas6210_power_off(void)
++{
++	gpio_set_value(NAS6210_GPIO_POWER_OFF, 1);
++}
++
++static void __init nas6210_init(void)
++{
++	/*
++	 * Basic setup. Needs to be called early.
++	 */
++	kirkwood_init();
++	kirkwood_mpp_conf(nas6210_mpp_config);
++
++	kirkwood_nand_init(ARRAY_AND_SIZE(nas6210_nand_parts), 25);
++	kirkwood_ehci_init();
++	kirkwood_ge00_init(&nas6210_ge00_data);
++	kirkwood_sata_init(&nas6210_sata_data);
++	kirkwood_uart0_init();
++	platform_device_register(&nas6210_leds);
++	platform_device_register(&nas6210_button_device);
++	if (gpio_request(NAS6210_GPIO_POWER_OFF, "power-off") == 0 &&
++	    gpio_direction_output(NAS6210_GPIO_POWER_OFF, 0) == 0)
++		pm_power_off = nas6210_power_off;
++	else
++		pr_err("nas6210: failed to configure power-off GPIO\n");
++}
++
++static int __init nas6210_pci_init(void)
++{
++	if (machine_is_nas6210()) {
++		u32 dev, rev;
++
++		kirkwood_pcie_id(&dev, &rev);
++		if (dev == MV88F6282_DEV_ID)
++			kirkwood_pcie_init(KW_PCIE1 | KW_PCIE0);
++		else
++			kirkwood_pcie_init(KW_PCIE0);
++	}
++
++	return 0;
++}
++subsys_initcall(nas6210_pci_init);
++
++MACHINE_START(NAS6210, "RaidSonic ICY BOX IB-NAS6210")
++	/* Maintainer: <gmbnomis at gmail dot com> */
++	.atag_offset	= 0x100,
++	.init_machine	= nas6210_init,
++	.map_io		= kirkwood_map_io,
++	.init_early	= kirkwood_init_early,
++	.init_irq	= kirkwood_init_irq,
++	.timer		= &kirkwood_timer,
++MACHINE_END
+Index: profiles/400-RaidSonic.mk
+===================================================================
+--- profiles/400-RaidSonic.mk	(revision 0)
++++ profiles/400-RaidSonic.mk	(revision 0)
+@@ -0,0 +1,17 @@
++#
++# Copyright (C) 2012 OpenWrt.org
++#
++# This is free software, licensed under the GNU General Public License v2.
++# See /LICENSE for more information.
++#
++
++define Profile/RaidSonic
++  NAME:=ICY BOX IB-NAS62x0
++  PACKAGES:=
++endef
++
++define Profile/RaidSonic/Description
++        RaidSonic ICY BOX IB-NAS62x0
++endef
++
++$(eval $(call Profile,RaidSonic))
+Index: patches/200-iconnect.patch
+===================================================================
+--- patches/200-iconnect.patch	(revision 30968)
++++ patches/200-iconnect.patch	(working copy)
+@@ -35,7 +35,7 @@
+  #define MPP12_SPI_MOSI		MPP( 12, 0xb, 0, 1, 0,   0,   0,   0,   1 )
+ --- /dev/null
+ +++ b/arch/arm/mach-kirkwood/iconnect-setup.c
+-@@ -0,0 +1,188 @@
++@@ -0,0 +1,203 @@
+ +/*
+ + * arch/arm/mach-kirkwood/iconnect-setup.c
+ + *
+@@ -57,6 +57,7 @@
+ +#include <linux/gpio_keys.h>
+ +#include <linux/input.h>
+ +#include <linux/leds.h>
+++#include <linux/i2c.h>
+ +#include <asm/mach-types.h>
+ +#include <asm/mach/arch.h>
+ +#include <mach/kirkwood.h>
+@@ -89,6 +90,11 @@
+ +
+ +static struct gpio_led iconnect_led_pins[] = {
+ +	{
+++		.name			= "iconnect:led_level",
+++		.default_trigger	= "default-on",
+++		.gpio			= 41,
+++	},
+++	{
+ +		.name			= "iconnect:blue:power",
+ +		.default_trigger	= "default-on",
+ +		.gpio			= 42,
+@@ -174,6 +180,7 @@
+ +static unsigned int iconnect_mpp_config[] __initdata = {
+ +	MPP12_GPIO, /*Input for reset button*/
+ +	MPP35_GPIO, /*Input for OTB button*/
+++	MPP41_GPIO,
+ +	MPP42_GPIO,
+ +	MPP43_GPIO,
+ +	MPP44_GPIO,
+@@ -184,6 +191,10 @@
+ +	0
+ +};
+ +
+++static struct i2c_board_info __initdata iconnect_i2c_rtc = {
+++	I2C_BOARD_INFO("lm63", 0x4c),
+++};
+++
+ +static void __init iconnect_init(void)
+ +{
+ +	u32 dev, rev;
+@@ -201,10 +212,13 @@
+ +	kirkwood_pcie_id(&dev, &rev);
+ +
+ +	kirkwood_uart0_init();
+-+	kirkwood_i2c_init();
+ +
+ +	platform_device_register(&iconnect_leds);
+ +	platform_device_register(&iconnect_button_device);
+++	
+++	kirkwood_i2c_init();
+++	i2c_register_board_info(0, &iconnect_i2c_rtc, 1);
+++
+ +}
+ +
+ +static int __init iconnect_pci_init(void)
+@@ -221,6 +235,7 @@
+ +	.boot_params	= 0x00000100,
+ +	.init_machine	= iconnect_init,
+ +	.map_io		= kirkwood_map_io,
+++	.init_early	= kirkwood_init_early,
+ +	.init_irq	= kirkwood_init_irq,
+ +	.timer		= &kirkwood_timer,
+ +MACHINE_END
+Index: patches/100-boards.patch
+===================================================================
+--- patches/100-boards.patch	(revision 0)
++++ patches/100-boards.patch	(revision 0)
+@@ -0,0 +1,41 @@
++--- a/arch/arm/mach-kirkwood/Makefile
+++++ b/arch/arm/mach-kirkwood/Makefile
++@@ -18,5 +18,7 @@ obj-$(CONFIG_MACH_D2NET_V2)		+= d2net_v2
++ obj-$(CONFIG_MACH_NET2BIG_V2)		+= netxbig_v2-setup.o lacie_v2-common.o
++ obj-$(CONFIG_MACH_NET5BIG_V2)		+= netxbig_v2-setup.o lacie_v2-common.o
++ obj-$(CONFIG_MACH_T5325)		+= t5325-setup.o
+++obj-$(CONFIG_MACH_ICONNECT)		+= iconnect-setup.o
+++obj-$(CONFIG_MACH_NAS6210)		+= nas6210-setup.o
++ 
++ obj-$(CONFIG_CPU_IDLE)			+= cpuidle.o
++--- a/arch/arm/mach-kirkwood/Kconfig
+++++ b/arch/arm/mach-kirkwood/Kconfig
++@@ -130,6 +130,18 @@ config MACH_T5325
++ 	  Say 'Y' here if you want your kernel to support the
++ 	  HP t5325 Thin Client.
++ 
+++config MACH_ICONNECT
+++	bool "Iomega iConnect Wireless"
+++	help
+++	  Say 'Y' here if you want your kernel to support the
+++	  Iomega iConnect Wireless.
+++
+++config MACH_NAS6210
+++	bool "RaidSonic ICY BOX IB-NAS6210"
+++	help
+++	  Say 'Y' here if you want your kernel to support the
+++	  RaidSonic ICY BOX IB-NAS6210 device.
+++
++ endmenu
++ 
++ endif
++--- a/arch/arm/mach-kirkwood/mpp.h
+++++ b/arch/arm/mach-kirkwood/mpp.h
++@@ -102,6 +102,7 @@
++ #define MPP11_SATA0_ACTn	MPP( 11, 0x5, 0, 1, 0,   1,   1,   1,   1 )
++ 
++ #define MPP12_GPO		MPP( 12, 0x0, 0, 1, 1,   1,   1,   1,   1 )
+++#define MPP12_GPIO		MPP( 12, 0x0, 1, 1, 1,   1,   1,   1,   1 )
++ #define MPP12_SD_CLK		MPP( 12, 0x1, 0, 1, 1,   1,   1,   1,   1 )
++ #define MPP12_AU_SPDIF0		MPP( 12, 0xa, 0, 1, 0,   0,   0,   0,   1 )
++ #define MPP12_SPI_MOSI		MPP( 12, 0xb, 0, 1, 0,   0,   0,   0,   1 )
+Index: patches/002-mvsdio_delay.patch
+===================================================================
+--- patches/002-mvsdio_delay.patch	(revision 30968)
++++ patches/002-mvsdio_delay.patch	(working copy)
+@@ -1,6 +1,6 @@
+ --- a/drivers/mmc/core/sd.c
+ +++ b/drivers/mmc/core/sd.c
+-@@ -332,6 +332,15 @@ int mmc_sd_switch_hs(struct mmc_card *ca
++@@ -389,6 +389,15 @@ int mmc_sd_switch_hs(struct mmc_card *ca
+  		return -ENOMEM;
+  	}
+  
+@@ -18,7 +18,7 @@
+  		goto out;
+ --- a/drivers/mmc/core/core.c
+ +++ b/drivers/mmc/core/core.c
+-@@ -303,9 +303,9 @@ void mmc_set_data_timeout(struct mmc_dat
++@@ -517,9 +517,9 @@ void mmc_set_data_timeout(struct mmc_dat
+  			 * The limit is really 250 ms, but that is
+  			 * insufficient for some crappy cards.
+  			 */
+Index: config-default
+===================================================================
+--- config-default	(revision 30968)
++++ config-default	(working copy)
+@@ -1,21 +1,24 @@
+ CONFIG_ALIGNMENT_TRAP=y
++CONFIG_ARCH_HAS_CPU_IDLE_WAIT=y
+ CONFIG_ARCH_KIRKWOOD=y
+-# CONFIG_ARCH_NUC93X is not set
+ CONFIG_ARCH_REQUIRE_GPIOLIB=y
+ # CONFIG_ARCH_SELECT_MEMORY_MODEL is not set
+ # CONFIG_ARCH_SPARSEMEM_DEFAULT is not set
+ # CONFIG_ARCH_SUPPORTS_MSI is not set
+-CONFIG_ARCH_SUSPEND_POSSIBLE=y
+ # CONFIG_ARCH_USES_GETTIMEOFFSET is not set
+ CONFIG_ARM=y
++# CONFIG_ARM_CPU_SUSPEND is not set
+ CONFIG_ARM_L1_CACHE_SHIFT=5
++CONFIG_ARM_PATCH_PHYS_VIRT=y
+ # CONFIG_ARM_THUMB is not set
+ # CONFIG_ARPD is not set
+-CONFIG_BITREVERSE=y
++CONFIG_BCMA_POSSIBLE=y
+ CONFIG_BLK_DEV_SD=y
+ CONFIG_CACHE_FEROCEON_L2=y
+ # CONFIG_CACHE_FEROCEON_L2_WRITETHROUGH is not set
++CONFIG_CLKSRC_MMIO=y
+ CONFIG_CMDLINE="rootdelay=1 root=/dev/mmcblk0p1 noinitrd console=ttyS0,115200"
++CONFIG_CMDLINE_FROM_BOOTLOADER=y
+ CONFIG_CPU_32v5=y
+ CONFIG_CPU_ABRT_EV5T=y
+ CONFIG_CPU_CACHE_VIVT=y
+@@ -28,24 +31,24 @@
+ CONFIG_CPU_IDLE=y
+ CONFIG_CPU_IDLE_GOV_LADDER=y
+ CONFIG_CPU_PABRT_LEGACY=y
++CONFIG_CPU_PM=y
+ CONFIG_CPU_TLB_FEROCEON=y
+ CONFIG_DEBUG_KERNEL=y
++CONFIG_CPU_USE_DOMAINS=y
+ # CONFIG_DEBUG_USER is not set
+ CONFIG_DECOMPRESS_LZMA=y
+-CONFIG_DEVPORT=y
+ # CONFIG_DLCI is not set
+-# CONFIG_DM9000 is not set
+ CONFIG_DNOTIFY=y
+ CONFIG_EXT4_FS=y
+-# CONFIG_FPE_FASTFPE is not set
+-# CONFIG_FPE_NWFPE is not set
+ CONFIG_FRAME_POINTER=y
++CONFIG_FS_MBCACHE=y
+ CONFIG_GENERIC_ATOMIC64=y
++CONFIG_GENERIC_BUG=y
+ CONFIG_GENERIC_CLOCKEVENTS=y
+ CONFIG_GENERIC_CLOCKEVENTS_BUILD=y
+-CONFIG_GENERIC_FIND_LAST_BIT=y
+ CONFIG_GENERIC_GPIO=y
+-CONFIG_GENERIC_HARDIRQS_NO__DO_IRQ=y
++CONFIG_GENERIC_IRQ_CHIP=y
++CONFIG_GENERIC_IRQ_SHOW=y
+ CONFIG_GPIOLIB=y
+ # CONFIG_HAMRADIO is not set
+ CONFIG_HARDIRQS_SW_RESEND=y
+@@ -54,29 +57,41 @@
+ CONFIG_HAS_IOPORT=y
+ CONFIG_HAVE_AOUT=y
+ CONFIG_HAVE_ARCH_KGDB=y
++CONFIG_HAVE_ARCH_PFN_VALID=y
++CONFIG_HAVE_C_RECORDMCOUNT=y
++CONFIG_HAVE_DMA_API_DEBUG=y
++CONFIG_HAVE_DYNAMIC_FTRACE=y
++CONFIG_HAVE_FTRACE_MCOUNT_RECORD=y
++CONFIG_HAVE_FUNCTION_GRAPH_TRACER=y
+ CONFIG_HAVE_FUNCTION_TRACER=y
+ CONFIG_HAVE_GENERIC_DMA_COHERENT=y
++CONFIG_HAVE_GENERIC_HARDIRQS=y
+ CONFIG_HAVE_IDE=y
++CONFIG_HAVE_IRQ_WORK=y
+ CONFIG_HAVE_KERNEL_GZIP=y
+ CONFIG_HAVE_KERNEL_LZMA=y
+ CONFIG_HAVE_KERNEL_LZO=y
+-CONFIG_HAVE_KPROBES=y
+-CONFIG_HAVE_KRETPROBES=y
+ CONFIG_HAVE_LATENCYTOP_SUPPORT=y
++CONFIG_HAVE_MEMBLOCK=y
+ CONFIG_HAVE_OPROFILE=y
+ CONFIG_HAVE_PERF_EVENTS=y
+ CONFIG_HAVE_PROC_CPU=y
++CONFIG_HAVE_REGS_AND_STACK_ACCESS_API=y
++CONFIG_HAVE_SCHED_CLOCK=y
++CONFIG_HAVE_SPARSE_IRQ=y
+ CONFIG_HW_RANDOM=y
+-# CONFIG_I2C_MV64XXX is not set
+ CONFIG_INET_LRO=y
+ CONFIG_INITRAMFS_SOURCE=""
+ # CONFIG_IP_ADVANCED_ROUTER is not set
+ CONFIG_IP_PIMSM_V1=y
+ CONFIG_IP_PIMSM_V2=y
+-CONFIG_JBD=y
++CONFIG_JBD2=y
++CONFIG_KTIME_SCALAR=y
+ CONFIG_LEDS_GPIO=y
+ CONFIG_LEGACY_PTYS=y
+ CONFIG_LEGACY_PTY_COUNT=256
++CONFIG_LZO_COMPRESS=y
++CONFIG_LZO_DECOMPRESS=y
+ # CONFIG_MACH_D2NET_V2 is not set
+ # CONFIG_MACH_DB88F6281_BP is not set
+ CONFIG_MACH_DOCKSTAR=y
+@@ -85,10 +100,12 @@
+ CONFIG_MACH_ICONNECT=y
+ # CONFIG_MACH_INETSPACE_V2 is not set
+ # CONFIG_MACH_MV88F6281GTW_GE is not set
++CONFIG_MACH_NAS6210=y
+ # CONFIG_MACH_NET2BIG_V2 is not set
+ # CONFIG_MACH_NET5BIG_V2 is not set
+ # CONFIG_MACH_NETSPACE_MAX_V2 is not set
+ # CONFIG_MACH_NETSPACE_V2 is not set
++CONFIG_MACH_OPENRD=y
+ CONFIG_MACH_OPENRD_BASE=y
+ CONFIG_MACH_OPENRD_CLIENT=y
+ # CONFIG_MACH_OPENRD_ULTIMATE is not set
+@@ -98,6 +115,7 @@
+ # CONFIG_MACH_T5325 is not set
+ # CONFIG_MACH_TS219 is not set
+ # CONFIG_MACH_TS41X is not set
++# CONFIG_MLX4_CORE is not set
+ CONFIG_MMC=y
+ CONFIG_MMC_BLOCK=y
+ CONFIG_MMC_MVSDIO=y
+@@ -110,16 +128,20 @@
+ # CONFIG_MTD_ROOTFS_ROOT_DEV is not set
+ # CONFIG_MTD_ROOTFS_SPLIT is not set
+ # CONFIG_MTD_SM_COMMON is not set
++CONFIG_MTD_UBI=y
++CONFIG_MTD_UBI_BEB_RESERVE=1
++# CONFIG_MTD_UBI_DEBUG is not set
++# CONFIG_MTD_UBI_GLUEBI is not set
++CONFIG_MTD_UBI_WL_THRESHOLD=4096
+ CONFIG_MV643XX_ETH=y
+ CONFIG_NEED_DMA_MAP_STATE=y
++CONFIG_NEED_PER_CPU_KM=y
+ CONFIG_NET_DSA=y
+ # CONFIG_NET_DSA_MV88E6060 is not set
+-# CONFIG_NET_DSA_MV88E6123_61_65 is not set
+ CONFIG_NET_DSA_MV88E6131=y
+ CONFIG_NET_DSA_MV88E6XXX=y
+ CONFIG_NET_DSA_MV88E6XXX_NEED_PPU=y
+ CONFIG_NET_DSA_TAG_DSA=y
+-# CONFIG_NET_DSA_TAG_EDSA is not set
+ # CONFIG_NET_DSA_TAG_TRAILER is not set
+ CONFIG_NLS=y
+ CONFIG_OUTER_CACHE=y
+@@ -129,17 +151,25 @@
+ CONFIG_PERF_USE_VMALLOC=y
+ CONFIG_PHYLIB=y
+ CONFIG_PLAT_ORION=y
++# CONFIG_PREEMPT_RCU is not set
++# CONFIG_QUOTACTL is not set
+ CONFIG_RTC_CLASS=y
+ CONFIG_RTC_DRV_MV=y
+ CONFIG_SCSI=y
+-CONFIG_SCSI_MOD=y
+ # CONFIG_SCSI_MULTI_LUN is not set
+ # CONFIG_SDIO_UART is not set
+-# CONFIG_SERIAL_8250_EXTENDED is not set
+ CONFIG_SPLIT_PTLOCK_CPUS=999999
+ CONFIG_SYS_SUPPORTS_APM_EMULATION=y
++CONFIG_UBIFS_FS=y
++CONFIG_UBIFS_FS_ADVANCED_COMPR=y
++# CONFIG_UBIFS_FS_DEBUG is not set
++CONFIG_UBIFS_FS_LZO=y
++CONFIG_UBIFS_FS_XATTR=y
++CONFIG_UBIFS_FS_ZLIB=y
+ CONFIG_UID16=y
+ CONFIG_USB=y
++CONFIG_USB_ARCH_HAS_XHCI=y
++CONFIG_USB_COMMON=y
+ CONFIG_USB_EHCI_HCD=y
+ CONFIG_USB_STORAGE=y
+ CONFIG_USB_SUPPORT=y
+Index: base-files/sbin/install2ubi
+===================================================================
+--- base-files/sbin/install2ubi	(revision 0)
++++ base-files/sbin/install2ubi	(revision 0)
+@@ -0,0 +1,14 @@
++#!/bin/sh
++
++# Copyright (C) 2011 Marvell Smiconductors
++
++read -p "Do you want to install currently running firmware to NAND flash using UBI, [y/n]?" input
++
++if [ "${input}" == "y" ]; then
++	echo "Performing install into NAND flash using UBI..."
++	ubiformat /dev/mtd2 -s 512 && ubiattach /dev/ubi_ctrl -m 2 && ubimkvol /dev/ubi0 -N rootfs -m && mount -t ubifs ubi0:rootfs /mnt
++	cd /; ls -1 | grep -vE "proc|sys|tmp|mnt" | awk '{print "cp -a "$1" /mnt/"}' | sh; mkdir -p /mnt/proc /mnt/sys /mnt/tmp /mnt/mnt; cd -
++	echo "Performed install into NAND flash using UBI, you may reboot into new system."
++else
++	echo "Skipping install into NAND flash."
++fi
+
+Property changes on: base-files/sbin/install2ubi
+___________________________________________________________________
+Added: svn:executable
+   + *
+
+Index: Makefile
+===================================================================
+--- Makefile	(revision 30968)
++++ Makefile	(working copy)
+@@ -1,5 +1,5 @@
+ #
+-# Copyright (C) 2009-2011 OpenWrt.org
++# Copyright (C) 2009-2012 OpenWrt.org
+ #
+ # This is free software, licensed under the GNU General Public License v2.
+ # See /LICENSE for more information.
+@@ -9,10 +9,10 @@
+ ARCH:=arm
+ BOARD:=kirkwood
+ BOARDNAME:=Marvell Kirkwood
+-FEATURES:=targz usb jffs2
++FEATURES:=targz usb jffs2 squashfs ubifs
+ MAINTAINER:=Imre Kaloz <kaloz@openwrt.org>
+ 
+-LINUX_VERSION:=2.6.37.6
++LINUX_VERSION:=3.2.9
+ 
+ include $(INCLUDE_DIR)/target.mk
+ 
